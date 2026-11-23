@@ -19,6 +19,7 @@ import json
 import sqlite3
 from typing import Iterable, Sequence
 
+from . import diff as diff_engine
 from . import engine
 from .engine import EditTableError, Line, Segment
 from .errors import Conflict, Invalid, NotFound
@@ -880,3 +881,96 @@ def list_publications(conn: sqlite3.Connection, film_id: int) -> list[dict]:
         (film_id,),
     )
     return [get_publication(conn, row["id"]) for row in rows]
+
+
+def _publication_row(
+    conn: sqlite3.Connection, publication_id: int
+) -> dict | None:
+    return _one(
+        conn,
+        """
+        SELECT p.id, p.film_id, f.name AS film_name, p.delivery_id,
+               p.output_version, p.edit_version, p.created_at
+          FROM publications p
+          JOIN films f ON f.id = p.film_id
+         WHERE p.id = ?
+        """,
+        (publication_id,),
+    )
+
+
+def require_publication(conn: sqlite3.Connection, publication_id: int) -> dict:
+    """Fetch a frozen publication or raise 404.
+
+    Publications only exist for deliveries that finished publishing, so a
+    missing id covers both an unknown id and an unfinished (open/rejected)
+    delivery.
+    """
+
+    row = _publication_row(conn, publication_id)
+    if row is None:
+        raise NotFound(
+            "publication_not_found",
+            f"publication {publication_id} does not exist or the delivery "
+            "has not been published",
+            details={"publication_id": publication_id},
+        )
+    return get_publication(conn, row["id"])
+
+
+def _publication_for_output(
+    conn: sqlite3.Connection, film_id: int, output_version: int
+) -> dict:
+    get_film(conn, film_id)
+    row = _one(
+        conn,
+        "SELECT id FROM publications WHERE film_id = ? AND output_version = ?",
+        (film_id, output_version),
+    )
+    if row is None:
+        raise NotFound(
+            "publication_version_not_found",
+            f"film {film_id} has no successful publication with output version "
+            f"{output_version}",
+            details={"film_id": film_id, "output_version": output_version},
+        )
+    return get_publication(conn, row["id"])
+
+
+def publication_diff(
+    conn: sqlite3.Connection, base_id: int, target_id: int
+) -> dict:
+    """Diff two frozen publications, refusing cross-film comparisons.
+
+    Only the immutable publication tables are read, so re-versioning subtitles
+    or edit tables afterwards cannot change the answer.
+    """
+
+    base = require_publication(conn, base_id)
+    target = require_publication(conn, target_id)
+    if base["film_id"] != target["film_id"]:
+        raise Conflict(
+            "publications_from_different_films",
+            "the two publications belong to different films and cannot be compared",
+            details={
+                "base": {
+                    "publication_id": base["id"],
+                    "film_id": base["film_id"],
+                },
+                "target": {
+                    "publication_id": target["id"],
+                    "film_id": target["film_id"],
+                },
+            },
+        )
+    return diff_engine.diff_publications(base, target)
+
+
+def publication_diff_by_versions(
+    conn: sqlite3.Connection, film_id: int, base_version: int, target_version: int
+) -> dict:
+    """Diff two successful output versions of one finished film."""
+
+    base = _publication_for_output(conn, film_id, base_version)
+    target = _publication_for_output(conn, film_id, target_version)
+    return diff_engine.diff_publications(base, target)

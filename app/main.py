@@ -8,7 +8,7 @@ from __future__ import annotations
 import sqlite3
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -244,6 +244,21 @@ def list_publications(film_id: int):
         return store.list_publications(conn, film_id)
 
 
+@app.get("/publications/diff")
+def diff_publications(
+    base: int = Query(..., gt=0, description="基准发布 id"),
+    target: int = Query(..., gt=0, description="对比发布 id"),
+):
+    """Diff two frozen publications, identified by publication id.
+
+    Reads only the two immutable snapshots.  Invalid ids, cross-film pairs and
+    deliveries that never finished publishing are refused.
+    """
+
+    with db.read_conn() as conn:
+        return store.publication_diff(conn, base, target)
+
+
 @app.get("/publications/{publication_id}")
 def get_publication(publication_id: int):
     with db.read_conn() as conn:
@@ -254,6 +269,25 @@ def get_publication(publication_id: int):
 def latest_publication(film_id: int, output_version: int | None = None):
     with db.read_conn() as conn:
         return store.latest_publication(conn, film_id, output_version)
+
+
+@app.get("/films/{film_id}/publications/diff")
+def diff_film_publications(
+    film_id: int,
+    base_version: int = Query(..., gt=0, alias="base", description="基准发布版本号"),
+    target_version: int = Query(..., gt=0, alias="target", description="对比发布版本号"),
+):
+    """Diff two successful output versions of the same finished film.
+
+    Both versions must be completed, frozen publications of this film; the
+    snapshots are fixed at publish time, so later subtitle or edit-table
+    re-versions never alter the result.
+    """
+
+    with db.read_conn() as conn:
+        return store.publication_diff_by_versions(
+            conn, film_id, base_version, target_version
+        )
 
 
 @app.get("/films/{film_id}/subtitles/latest")

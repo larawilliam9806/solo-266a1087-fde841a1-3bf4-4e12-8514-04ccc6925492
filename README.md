@@ -77,6 +77,8 @@ python -m pytest
 | GET | `/films/{id}/subtitles/latest` | **播出端**：最近一次成功交付的字幕 + 同次待复核片段 |
 | GET | `/films/{id}/subtitles/latest?output_version=N` | 取某个历史发布版本 |
 | GET | `/publications/{id}` | 按发布 id 取冻结副本 |
+| GET | `/films/{id}/publications/diff?base=N&target=M` | **发布差异**：同一成片两个成功版本逐条比对 |
+| GET | `/publications/diff?base=ID&target=ID` | 按发布 id 比对两份冻结快照（跨成片拒绝） |
 
 ### 请求示例
 
@@ -123,6 +125,74 @@ curl localhost:8000/films/1/subtitles/latest
 `reviews` 与 `subtitles` 来自**同一次**成功交付，所以播出端可以把
 「已审台词」和「需要复核的半句」一起取走。
 
+## 发布差异查询（重剪后逐条核对两次字幕交付）
+
+重剪并重新发布后，字幕员需要逐条核对两次交付。差异接口读取**同一成片的两个
+成功版本**（两份不可变发布快照），按下面的三元组匹配每一条成片字幕和待复核片段：
+
+- **原片号** `source_reel_id`
+- **台词编号** `line_number`
+- **成片出现次序** `occurrence`：同一句台词在成片里出现多次时（片段复用、或一句被
+  切成几段），把成片字幕（`cue`）和待复核片段（`review`）合在一起，按成片时码
+  从 0 开始编号；第 n 次出现只与另一版的第 n 次出现配对。
+
+匹配后报告四类结果，每类都带原片号、台词编号和出现次序：
+
+| 类别 | 含义 |
+| --- | --- |
+| `added` | 只在 target 版出现（`only_in: "target"`），含新增的字幕或待复核片段 |
+| `deleted` | 只在 base 版出现（`only_in: "base"`），即本版被删掉的记录 |
+| `changed` | 两版都有，标出 `type`（cue/review 互变）、`text`（文字变化）、`time`（成片时段变化；待复核片段即 `keep_*` 时段）中的一项或多项 |
+| `unchanged` | 两版完全一致，`changes` 为空，便于逐条打勾核对 |
+
+两个入口读的都是**冻结的发布快照**，查询之后再换字幕版或剪辑表版，结果不会改变。
+
+```bash
+# 按成片的输出版本号比对（同一部成片）
+curl 'localhost:8000/films/1/publications/diff?base=1&target=2'
+
+# 或按发布 id 比对（可用于不同成片，但跨成片会被拒绝）
+curl 'localhost:8000/publications/diff?base=10&target=11'
+```
+
+返回示例：
+
+```json
+{
+  "film_id": 1,
+  "film_name": "成片甲",
+  "base": {"publication_id": 1, "output_version": 1, "edit_version": 1, "delivery_id": 1, "created_at": "..."},
+  "target": {"publication_id": 2, "output_version": 2, "edit_version": 2, "delivery_id": 3, "created_at": "..."},
+  "summary": {"added": 1, "deleted": 0, "changed": 2, "unchanged": 0},
+  "added": [
+    {"source_reel_id": 1, "line_number": 3, "occurrence": 0, "only_in": "target",
+     "record": {"type": "cue", "source_reel_id": 1, "source_reel_name": "A卷",
+                "line_number": 3, "text": "新增句", "start_ms": 4000, "end_ms": 5000}}
+  ],
+  "deleted": [],
+  "changed": [
+    {"source_reel_id": 1, "line_number": 2, "occurrence": 0,
+     "base":   {"type": "cue", "line_number": 2, "text": "待截句", "start_ms": 3000, "end_ms": 5000},
+     "target": {"type": "review", "line_number": 2, "text": "待截句",
+                "start_ms": 3000, "end_ms": 4000, "keep_start_ms": 3000, "keep_end_ms": 4000},
+     "changes": {
+       "type": {"base": "cue", "target": "review"},
+       "time": {"base": {"start_ms": 3000, "end_ms": 5000},
+                "target": {"start_ms": 3000, "end_ms": 4000}}
+     }}
+  ],
+  "unchanged": []
+}
+```
+
+差异接口的拒绝规则：
+
+- **无效版本**：版本号不是正整数 → 422 `validation_error`；版本号不存在 →
+  404 `publication_version_not_found`（按 id 查时为 404 `publication_not_found`）。
+- **未完成发布**：open / rejected 的交付不产生发布记录，引用到它等同于版本不存在，
+  同样 404 拒绝，不会拿交付快照凑数。
+- **跨成片**：两个发布 id 分属不同成片 → 409 `publications_from_different_films`。
+
 ## 数据模型
 
 | 表 | 说明 |
@@ -143,6 +213,6 @@ curl localhost:8000/films/1/subtitles/latest
 
 | 状态码 | 常见 `code` |
 | --- | --- |
-| 404 | `source_reel_not_found`、`film_not_found`、`subtitle_version_not_found`、`no_successful_delivery` |
-| 409 | `delivery_stale`、`delivery_not_open`、`source_reel_exists`、`film_exists` |
+| 404 | `source_reel_not_found`、`film_not_found`、`subtitle_version_not_found`、`no_successful_delivery`、`publication_not_found`、`publication_version_not_found` |
+| 409 | `delivery_stale`、`delivery_not_open`、`source_reel_exists`、`film_exists`、`publications_from_different_films` |
 | 422 | `validation_error`、`segments_overlap`、`unknown_source_reel` |
