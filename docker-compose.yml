@@ -1,0 +1,14 @@
+services:
+  api:
+    build: .
+    image: subtitle-delivery-api:latest
+    ports:
+      - "8000:8000"
+    environment:
+      SUBTITLE_DB_PATH: /data/subtitles.db
+    volumes:
+      - subtitle-data:/data
+    restart: unless-stopped
+
+volumes:
+  subtitle-data:
